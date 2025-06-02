@@ -1,6 +1,5 @@
 package org.example;
 
-import io.github.cdimascio.dotenv.Dotenv;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
@@ -28,10 +27,9 @@ import java.util.stream.Collectors;
 
 public class TelegramVoteBot extends TelegramLongPollingBot {
     // Bot configuration constants
-    static Dotenv dotenv = Dotenv.load();
-    private static final String TOKEN = dotenv.get("BOT_TOKEN");
+    private static final String TOKEN = System.getenv("BOT_TOKEN");
     private static final String BOT_USERNAME = "YourBotUsername"; // Replace with your bot's username
-    private static final String GROUP_ID = dotenv.get("GROUP_ID");       // Telegram group chat ID
+    private static final String GROUP_ID = System.getenv("GROUP_ID"); // Telegram group chat ID
     private static final ZoneId KYIV_ZONE = ZoneId.of("Europe/Kyiv");
     private static final Logger logger = Logger.getLogger(TelegramVoteBot.class.getName());
 
@@ -208,11 +206,11 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
     /**
      * Updates the poll message to display votes grouped by time option.
      * For each time option with at least one vote, the message shows:
-     *   - For typical time options (e.g. "13:00", "14:00", etc.): the header (escaped)
-     *     on one line, followed by each user mention on a new line.
-     *   - For the eye option (👁️): the header is replaced with "👁️" and all user mentions are
-     *     joined by commas.
-     *   - For the dash option ("—"): the header remains, and user mentions are joined by commas.
+     * - For typical time options (e.g. "13:00", "14:00", etc.): the header (escaped)
+     * on one line, followed by each user mention on a new line.
+     * - For the eye option (👁️): the header is replaced with "👁️" and all user mentions are
+     * joined by commas.
+     * - For the dash option ("—"): the header remains, and user mentions are joined by commas.
      * If no user voted for an option, that option is omitted from the message.
      */
     private void updatePollMessage() throws TelegramApiException {
@@ -391,6 +389,7 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
     public String getBotUsername() {
         return BOT_USERNAME;
     }
+
     @Override
     public String getBotToken() {
         return TOKEN;
@@ -416,13 +415,16 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
 class VoteData {
     private final String vote;
     private final String mention;
+
     public VoteData(String vote, String mention) {
         this.vote = vote;
         this.mention = mention;
     }
+
     public String getVote() {
         return vote;
     }
+
     public String getMention() {
         return mention;
     }
