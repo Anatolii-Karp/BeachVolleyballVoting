@@ -1,5 +1,6 @@
 package org.example;
 
+import io.github.cdimascio.dotenv.Dotenv;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
@@ -27,9 +28,10 @@ import java.util.stream.Collectors;
 
 public class TelegramVoteBot extends TelegramLongPollingBot {
     // Bot configuration constants
-    private static final String TOKEN = "";
+    static Dotenv dotenv = Dotenv.load();
+    private static final String TOKEN = dotenv.get("BOT_TOKEN");
     private static final String BOT_USERNAME = "YourBotUsername"; // Replace with your bot's username
-    private static final String GROUP_ID = "";       // Telegram group chat ID
+    private static final String GROUP_ID = dotenv.get("GROUP_ID");       // Telegram group chat ID
     private static final ZoneId KYIV_ZONE = ZoneId.of("Europe/Kyiv");
     private static final Logger logger = Logger.getLogger(TelegramVoteBot.class.getName());
 
