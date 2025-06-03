@@ -39,44 +39,30 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
             "13:00", "14:00", "15:00", "16:00", "17:00", "18:00+", "\uD83D\uDC41\uFE0F", "—"
     );
 
-    // Use LinkedHashMap to preserve the insertion order for vote counts.
-    private final Map<String, AtomicInteger> voteCounts = new LinkedHashMap<>();
-    // userVotes maps user ID to their vote data (option and MarkdownV2 mention)
-    private final ConcurrentHashMap<Long, VoteData> userVotes = new ConcurrentHashMap<>();
+    // Map of pollId -> PollData; each poll has its own vote data (vote counts and user votes)
+    private final ConcurrentHashMap<Integer, PollData> polls = new ConcurrentHashMap<>();
 
-    // Variables to store today's date (escaped for the main message) and the poll message ID
+    // Map of pollId -> Telegram poll message ID (for updating the correct message)
+    private final ConcurrentHashMap<Integer, Integer> activePollMessages = new ConcurrentHashMap<>();
+
+    // Variable to store today's date (escaped for the main message)
     private volatile String todayDateEscaped = "";
-    private volatile Integer pollMessageId = null;
 
-    // Global poll ID. Each new poll increments this value so that votes don't mix.
+    // Global poll ID. Each new poll increments this value, to uniquely identify polls.
     private volatile int currentPollId = 0;
 
-    // Executor for asynchronous processing and a scheduler for daily poll scheduling
+    // Executor for asynchronous processing and a scheduler for daily poll scheduling.
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
-    // Constructor – initialize vote counts and schedule the daily poll
+    // Constructor – schedules the daily poll.
     public TelegramVoteBot() {
-        resetVotes();
         scheduleDailyPoll();
     }
 
     /**
-     * Resets the vote counts and clears user votes.
-     * Inserts the options in the specified order.
-     */
-    private void resetVotes() {
-        voteCounts.clear();
-        userVotes.clear();
-        for (String time : timeOptions) {
-            // Insert the raw time string for display purposes (no escaping here)
-            voteCounts.put(time, new AtomicInteger(0));
-        }
-    }
-
-    /**
      * Utility function to escape special characters for Telegram MarkdownV2 formatting.
-     * Use this only for parts of the text that require MarkdownV2 (e.g., the date or time header).
+     * (Used for parts of the text that require MarkdownV2, e.g., the date or time header.)
      */
     public static String escapeMarkdownV2(String text) {
         if (text == null) return "";
@@ -85,21 +71,22 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
     }
 
     /**
-     * Generates an inline keyboard with a button for each time option.
+     * Generates an inline keyboard for a given poll using the PollData.
      * Each button's callback data is formatted as "pollId:option".
      */
-    public InlineKeyboardMarkup generateKeyboard() {
+    public InlineKeyboardMarkup generateKeyboard(int pollId) {
+        PollData pollData = polls.get(pollId);
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-        // Create a row for each time option button
-        for (Map.Entry<String, AtomicInteger> entry : voteCounts.entrySet()) {
+        // Create a row for each time option button.
+        for (Map.Entry<String, AtomicInteger> entry : pollData.getVoteCounts().entrySet()) {
             List<InlineKeyboardButton> row = new ArrayList<>();
-            String option = entry.getKey(); // raw time string (e.g., "18:00+" or "—")
+            String option = entry.getKey(); // Raw option string.
             int count = entry.getValue().get();
             String buttonText = option + " (" + count + " votes)";
             InlineKeyboardButton button = new InlineKeyboardButton();
-            button.setText(buttonText); // use raw text (no extra escaping)
-            // Embed the current poll ID in the callback data
-            button.setCallbackData(currentPollId + ":" + option);
+            button.setText(buttonText);
+            // Embed pollId into callback data.
+            button.setCallbackData(pollId + ":" + option);
             row.add(button);
             keyboard.add(row);
         }
@@ -109,36 +96,38 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
     }
 
     /**
-     * Sends the daily poll message asynchronously to the Telegram group.
-     * Creates a new poll (by incrementing the poll ID), resets votes, and sends the poll header.
+     * Sends a new daily poll message asynchronously.
+     * Creates a new poll (increments pollId), creates new PollData, and stores the message ID.
      */
     public void sendDailyPoll() {
         executor.submit(() -> {
             try {
-                // Reset votes for the new poll and increment the poll ID
-                resetVotes();
+                // Increment pollId.
                 currentPollId++;
-                // Get the current date in Kyiv timezone and format it
+                // Create new PollData for current poll.
+                PollData pollData = new PollData(timeOptions);
+                polls.put(currentPollId, pollData);
+
+                // Get the current date in Kyiv timezone and format it.
                 ZonedDateTime now = ZonedDateTime.now(KYIV_ZONE);
                 DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
                 String today = now.format(formatter);
-                // Escape the date for MarkdownV2
                 todayDateEscaped = escapeMarkdownV2(today);
 
-                // Compose the poll message header
+                // Compose the poll message header.
                 String pollMessage = "🏖🏐 " + todayDateEscaped + " 🏐🏖\n\nSelect a time for voting\\!";
 
-                // Build the SendMessage with MarkdownV2 parsing and the inline keyboard
+                // Build the SendMessage with MarkdownV2 parsing and the inline keyboard.
                 SendMessage message = new SendMessage();
                 message.setChatId(GROUP_ID);
                 message.setText(pollMessage);
                 message.setParseMode("MarkdownV2");
-                message.setReplyMarkup(generateKeyboard());
+                message.setReplyMarkup(generateKeyboard(currentPollId));
 
-                // Send the message and store its message ID for subsequent updates
+                // Send the poll message and store its message ID.
                 Message sentMessage = execute(message);
-                pollMessageId = sentMessage.getMessageId();
-                logger.info("Daily poll sent successfully (Long Polling mode) with poll ID " + currentPollId);
+                activePollMessages.put(currentPollId, sentMessage.getMessageId());
+                logger.info("Daily poll sent successfully with poll ID " + currentPollId);
             } catch (TelegramApiException e) {
                 logger.log(Level.SEVERE, "Error in sendDailyPoll: " + e.getMessage(), e);
             }
@@ -146,49 +135,50 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
     }
 
     /**
-     * Schedules the daily poll at a fixed time (19:09 Kyiv time)
-     * using a ScheduledExecutorService.
+     * Schedules the daily poll at a fixed time using a ScheduledExecutorService.
      */
     private void scheduleDailyPoll() {
         ZonedDateTime now = ZonedDateTime.now(KYIV_ZONE);
+        // Scheduled time adjusted as needed (e.g., 19:09 Kyiv time); here set to 16:47 as example.
         ZonedDateTime scheduledTime = now.withHour(16).withMinute(47).withSecond(0).withNano(0);
         if (now.compareTo(scheduledTime) > 0) {
             scheduledTime = scheduledTime.plusDays(1);
         }
         long initialDelay = Duration.between(now, scheduledTime).getSeconds();
-        long period = 24 * 60 * 60; // 24 hours in seconds
-
+        long period = 24 * 60 * 60; // 24 hours in seconds.
         scheduler.scheduleAtFixedRate(this::sendDailyPoll, initialDelay, period, TimeUnit.SECONDS);
-        logger.info("Scheduler set for daily poll at 19:09 Kyiv time. Initial delay: " + initialDelay + " seconds.");
+        logger.info("Scheduler set for daily poll. Initial delay: " + initialDelay + " seconds.");
     }
 
     /**
      * Handles the /vote command by sending a new voting message.
-     * This creates a new poll by resetting votes and incrementing the poll ID.
+     * Creates a new poll by incrementing the poll ID, initializing PollData, and storing the message ID.
      */
     private void startCommand(Message message) {
         executor.submit(() -> {
             try {
-                // Get the current date in Kyiv timezone and escape it for MarkdownV2
+                // Increment pollId and create new PollData.
+                currentPollId++;
+                PollData pollData = new PollData(timeOptions);
+                polls.put(currentPollId, pollData);
+
+                // Get the current date in Kyiv timezone and format it.
                 ZonedDateTime now = ZonedDateTime.now(KYIV_ZONE);
                 DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
                 String today = now.format(formatter);
                 todayDateEscaped = escapeMarkdownV2(today);
-
-                // Create a new poll by resetting votes and incrementing the poll ID
-                resetVotes();
-                currentPollId++;
 
                 String text = "🏖🏐 " + todayDateEscaped + " 🏐🏖";
                 SendMessage sendMessage = new SendMessage();
                 sendMessage.setChatId(GROUP_ID);
                 sendMessage.setText(text);
                 sendMessage.setParseMode("MarkdownV2");
-                sendMessage.setReplyMarkup(generateKeyboard());
+                sendMessage.setReplyMarkup(generateKeyboard(currentPollId));
 
+                // Send the poll message and store its message ID.
                 Message sentMsg = execute(sendMessage);
-                pollMessageId = sentMsg.getMessageId();
-                logger.info("Vote command executed in chat " + message.getChatId() + " with poll ID " + currentPollId);
+                activePollMessages.put(currentPollId, sentMsg.getMessageId());
+                logger.info("Vote command executed with poll ID " + currentPollId);
             } catch (TelegramApiException e) {
                 logger.log(Level.SEVERE, "Error in startCommand: " + e.getMessage(), e);
                 try {
@@ -204,20 +194,17 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
     }
 
     /**
-     * Updates the poll message to display votes grouped by time option.
-     * For each time option with at least one vote, the message shows:
-     * - For typical time options (e.g. "13:00", "14:00", etc.): the header (escaped)
-     * on one line, followed by each user mention on a new line.
-     * - For the eye option (👁️): the header is replaced with "👁️" and all user mentions are
-     * joined by commas.
-     * - For the dash option ("—"): the header remains, and user mentions are joined by commas.
-     * If no user voted for an option, that option is omitted from the message.
+     * Updates the poll message to display votes for a specific poll (by pollId).
+     * Only the poll message corresponding to the given pollId is updated.
      */
-    private void updatePollMessage() throws TelegramApiException {
+    private void updatePollMessage(int pollId) throws TelegramApiException {
+        // Get PollData for the specified pollId.
+        PollData pollData = polls.get(pollId);
         StringBuilder builder = new StringBuilder();
 
+        // For each time option, collect the mentions for that option.
         for (String option : timeOptions) {
-            List<String> mentions = userVotes.values().stream()
+            List<String> mentions = pollData.getUserVotes().values().stream()
                     .filter(v -> v.getVote().equals(option))
                     .map(VoteData::getMention)
                     .collect(Collectors.toList());
@@ -225,15 +212,13 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
                 String header;
                 String groupContent;
                 if (option.equals("\uD83D\uDC41\uFE0F")) {
-                    // For the eye option, replace header with "👁️" and join mentions with commas
+                    // For the "eye" option, use the corresponding emoji.
                     header = "\uD83D\uDC41\uFE0F";
                     groupContent = String.join(", ", mentions);
                 } else if (option.equals("—")) {
-                    // For dash option, header remains and join mentions with commas
                     header = option;
                     groupContent = String.join(", ", mentions);
                 } else {
-                    // For other time options, header is escaped and each user on a separate line
                     header = escapeMarkdownV2(option);
                     groupContent = String.join("\n", mentions);
                 }
@@ -241,20 +226,20 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
             }
         }
         String formattedMessage = "🏖🏐 " + todayDateEscaped + " 🏐🏖\n\n" + builder.toString().trim();
-
-        if (pollMessageId != null) {
+        Integer pollMsgId = activePollMessages.get(pollId);
+        if (pollMsgId != null) {
             EditMessageText editMessage = new EditMessageText();
             editMessage.setChatId(GROUP_ID);
-            editMessage.setMessageId(pollMessageId);
+            editMessage.setMessageId(pollMsgId);
             editMessage.setText(formattedMessage);
             editMessage.setParseMode("MarkdownV2");
-            // Use the keyboard without any toggle button (buttons now include poll ID)
-            editMessage.setReplyMarkup(generateKeyboard());
+            // Set the inline keyboard for this specific poll.
+            editMessage.setReplyMarkup(generateKeyboard(pollId));
             try {
                 execute(editMessage);
             } catch (TelegramApiException e) {
                 if (e.getMessage() != null && e.getMessage().contains("message is not modified")) {
-                    logger.info("Message not modified, update skipped.");
+                    logger.info("Message not modified, update skipped for poll ID " + pollId);
                 } else {
                     throw e;
                 }
@@ -264,10 +249,8 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
 
     /**
      * Handles callback queries when a user clicks an inline button.
-     * All toggle logic has been removed; only vote selection is processed.
      * The callback data is expected in the format "pollId:option".
-     * If the pollId from the callback does not match the current poll,
-     * the vote is rejected (with an appropriate callback answer).
+     * This method updates the PollData for the respective poll.
      */
     private void handleCallbackQuery(CallbackQuery query) {
         executor.submit(() -> {
@@ -275,7 +258,6 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
                 String data = query.getData();
                 String[] parts = data.split(":", 2);
                 if (parts.length < 2) {
-                    // Invalid callback data; reply accordingly.
                     AnswerCallbackQuery answer = new AnswerCallbackQuery();
                     answer.setCallbackQueryId(query.getId());
                     answer.setText("Invalid callback data, please try again.");
@@ -284,45 +266,44 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
                 }
                 int pollIdFromCallback = Integer.parseInt(parts[0]);
                 String selectedTime = parts[1];
-                // Check that the callback pollId matches the current poll_id
-                if (pollIdFromCallback != currentPollId) {
+
+                // Get the PollData corresponding to the pollId from callback.
+                PollData pollData = polls.get(pollIdFromCallback);
+                if (pollData == null) {
                     AnswerCallbackQuery answer = new AnswerCallbackQuery();
                     answer.setCallbackQueryId(query.getId());
                     answer.setText("Це голосування закрите.");
                     execute(answer);
                     return;
                 }
+
                 Long userId = query.getFrom().getId();
                 String firstName = query.getFrom().getFirstName();
                 String lastName = query.getFrom().getLastName() != null ? query.getFrom().getLastName() : "";
-
-                // Create a MarkdownV2 mention for the user
                 String safeName = escapeMarkdownV2(firstName + " " + lastName).trim();
                 String fullName = "[" + safeName + "](tg://user?id=" + userId + ")";
 
-                // Update vote counts atomically: if the user has previously voted, decrement that vote.
-                VoteData previousVote = userVotes.get(userId);
+                // If the user already voted in this poll, decrement the count for their previous vote.
+                VoteData previousVote = pollData.getUserVotes().get(userId);
                 if (previousVote != null) {
-                    AtomicInteger prevCount = voteCounts.get(previousVote.getVote());
+                    AtomicInteger prevCount = pollData.getVoteCounts().get(previousVote.getVote());
                     if (prevCount != null) {
                         prevCount.decrementAndGet();
                     }
                 }
-                // Store the new vote and increment its count.
-                userVotes.put(userId, new VoteData(selectedTime, fullName));
-                AtomicInteger currentCount = voteCounts.get(selectedTime);
+                // Record the new vote for this poll.
+                pollData.getUserVotes().put(userId, new VoteData(selectedTime, fullName));
+                AtomicInteger currentCount = pollData.getVoteCounts().get(selectedTime);
                 if (currentCount != null) {
                     currentCount.incrementAndGet();
                 }
+                // Update the poll message for the specific poll.
+                updatePollMessage(pollIdFromCallback);
 
-                // Update the poll message with the new vote counts and grouping.
-                updatePollMessage();
-
-                // Answer the callback query to remove the loading animation.
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(query.getId());
                 execute(answer);
-                logger.info("Vote updated by user " + userId + " for time " + selectedTime);
+                logger.info("Vote updated by user " + userId + " for time " + selectedTime + " in poll " + pollIdFromCallback);
             } catch (TelegramApiException e) {
                 logger.log(Level.SEVERE, "Error in handleCallbackQuery: " + e.getMessage(), e);
                 try {
@@ -338,7 +319,7 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
     }
 
     /**
-     * Handles the /get_chat_id command to return the chat ID for debugging.
+     * Handles the /get_chat_id command for debugging purposes.
      */
     private void handleGetChatId(Message message) {
         executor.submit(() -> {
@@ -410,7 +391,33 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
 }
 
 /**
- * Helper class to store vote data (selected time and user mention).
+ * Class for storing poll data for a single poll.
+ * It contains voteCounts for each option and a mapping of user IDs to their votes.
+ */
+class PollData {
+    // Map from option to its vote count
+    private final Map<String, AtomicInteger> voteCounts = new LinkedHashMap<>();
+    // Map from user ID to their VoteData
+    private final ConcurrentHashMap<Long, VoteData> userVotes = new ConcurrentHashMap<>();
+
+    // Constructor: initialize voteCounts with the provided time options.
+    public PollData(List<String> timeOptions) {
+        for (String option : timeOptions) {
+            voteCounts.put(option, new AtomicInteger(0));
+        }
+    }
+
+    public Map<String, AtomicInteger> getVoteCounts() {
+        return voteCounts;
+    }
+
+    public ConcurrentHashMap<Long, VoteData> getUserVotes() {
+        return userVotes;
+    }
+}
+
+/**
+ * Helper class to store vote data (selected option and user mention).
  */
 class VoteData {
     private final String vote;
