@@ -1,5 +1,6 @@
 package org.example;
 
+import static spark.Spark.*;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
@@ -380,6 +381,10 @@ public class TelegramVoteBot extends TelegramLongPollingBot {
      * Main method to register and start the long polling bot.
      */
     public static void main(String[] args) {
+        // Run web server for "keep-alive"
+        port(8080);
+        get("/", (req, res) -> "Bot is alive!");
+
         try {
             TelegramBotsApi botsApi = new TelegramBotsApi(DefaultBotSession.class);
             botsApi.registerBot(new TelegramVoteBot());
